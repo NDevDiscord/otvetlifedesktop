@@ -1,5 +1,6 @@
 import sys
 import os
+import glob
 from PyQt6.QtCore import QUrl, Qt
 from PyQt6.QtGui import QFont, QPalette, QColor, QGuiApplication
 from PyQt6.QtWidgets import (
@@ -11,6 +12,35 @@ from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEngineSettings, QWebEng
 
 # Set Google DNS for QtWebEngine
 os.environ["QTWEBENGINE_DNS_SERVER_ADDRESS"] = "8.8.8.8"
+
+class WebEnginePage(QWebEnginePage):
+    """Custom WebEnginePage to handle JavaScript console messages"""
+    def __init__(self, profile, parent):
+        super().__init__(profile, parent)
+        self.injected_plugins = set()  # Track injected plugins per page instance
+    
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):
+        print(f"JS [{level.name}]: {message} (Line: {line_number}, Source: {source_id})")
+    
+    def inject_plugins(self, plugins):
+        """Inject all plugins into the current page"""
+        if not plugins:
+            return
+            
+        print(f"→ Injecting {len(plugins)} plugins...")
+        for name, script in plugins.items():
+            # Only inject if not already injected
+            if name not in self.injected_plugins:
+                self.runJavaScript(script)
+                self.injected_plugins.add(name)
+                print(f"  ✓ Injected: {name}")
+            else:
+                print(f"  ✓ Already injected: {name}")
+    
+    def reset_injection_state(self):
+        """Reset injection state for new page"""
+        self.injected_plugins = set()
+        print("↻ Plugin injection state reset for new page")
 
 class ModernBrowser(QMainWindow):
     def __init__(self):
@@ -105,11 +135,11 @@ class ModernBrowser(QMainWindow):
         self.profile.setHttpUserAgent(user_agent)
         
         # Create web page with our custom profile
-        web_page = QWebEnginePage(self.profile, self)
+        self.web_page = WebEnginePage(self.profile, self)  # Use custom page
         
         # Now create web view with our custom page
         self.web_view = QWebEngineView()
-        self.web_view.setPage(web_page)
+        self.web_view.setPage(self.web_page)
         self.web_view.setStyleSheet("background-color: white; border: none;")
         self.web_view.urlChanged.connect(self.update_url_display)
         self.web_view.titleChanged.connect(self.update_window_title)
@@ -131,6 +161,13 @@ class ModernBrowser(QMainWindow):
         # Add widgets to main layout
         main_layout.addWidget(nav_bar)
         main_layout.addWidget(self.web_view, 1)
+        
+        # Load plugins
+        self.plugin_scripts = {}
+        self.load_plugins()
+        
+        # Connect all page change signals
+        self.connect_page_change_signals()
         
         # Load initial URL
         self.load_url_from_file()
@@ -168,6 +205,82 @@ class ModernBrowser(QMainWindow):
             }}
         """)
         return button
+    
+    def connect_page_change_signals(self):
+        """Connect to all signals that indicate page content has changed"""
+        # Connect to load finished signal
+        self.web_view.loadFinished.connect(self.on_page_loaded)
+        
+        # Connect to navigation signals
+        self.web_view.urlChanged.connect(self.on_url_changed)
+        
+        # Connect to page reload signals
+        self.reload_btn.clicked.connect(self.on_reload_triggered)
+    
+    def on_page_loaded(self, success):
+        """Handle page load completion"""
+        if success:
+            print("✓ Page loaded successfully")
+            # Reset injection state for new page
+            self.web_page.reset_injection_state()
+            self.inject_plugins()
+        else:
+            print("✗ Page load failed")
+    
+    def on_url_changed(self, url):
+        """Handle URL changes (navigation)"""
+        print(f"→ Navigating to: {url.toString()}")
+        # Reset injection state for new page
+        self.web_page.reset_injection_state()
+        # Inject plugins after a short delay to ensure DOM is ready
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(500, self.inject_plugins)
+    
+    def on_reload_triggered(self):
+        """Handle explicit reloads"""
+        print("↻ Reloading page...")
+        # Reset injection state for reloaded page
+        self.web_page.reset_injection_state()
+        # Inject plugins after reload completes
+        self.web_view.loadFinished.connect(self.inject_plugins_once)
+    
+    def inject_plugins_once(self, success):
+        """Inject plugins and disconnect from the signal"""
+        if success:
+            self.inject_plugins()
+        self.web_view.loadFinished.disconnect(self.inject_plugins_once)
+    
+    def load_plugins(self):
+        """Load all JavaScript plugins from the plugins directory"""
+        plugin_dir = os.path.join(os.getcwd(), "plugins")
+        os.makedirs(plugin_dir, exist_ok=True)
+        print(f"Loading plugins from: {plugin_dir}")
+        
+        # Clear existing plugins
+        self.plugin_scripts = {}
+        
+        for file_path in glob.glob(os.path.join(plugin_dir, "*.js")):
+            plugin_name = os.path.basename(file_path)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    self.plugin_scripts[plugin_name] = f.read()
+                    print(f"✓ Loaded plugin: {plugin_name}")
+            except Exception as e:
+                print(f"✗ Error loading plugin {plugin_name}: {str(e)}")
+        
+        # Inject immediately if page is already loaded
+        if self.web_view.url().isValid():
+            self.web_page.reset_injection_state()
+            self.inject_plugins()
+    
+    def inject_plugins(self):
+        """Inject all loaded plugins into the current page"""
+        if not self.plugin_scripts:
+            print("! No plugins to inject")
+            return
+            
+        print(f"→ Injecting {len(self.plugin_scripts)} plugins...")
+        self.web_page.inject_plugins(self.plugin_scripts)
     
     def load_url_from_file(self):
         try:
